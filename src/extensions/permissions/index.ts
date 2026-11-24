@@ -262,7 +262,7 @@ function registerPermissions(pi: ExtensionAPI, options: PermissionsExtensionOpti
 		type: "boolean",
 		default: false,
 	})
-	pi.registerFlag(DANGEROUS_BYPASS_FLAG, {
+	pi.registerFlag("dangerously-skip-permissions", {
 		description:
 			"DANGER: Skip ALL permission checks including denylist (sudo, .env writes), rules, classifier, and prompts. Intended for throwaway/sandbox environments only.",
 		type: "boolean",
