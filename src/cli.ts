@@ -158,6 +158,7 @@ import rateLimitNoticeExtension from "./extensions/rate-limit-notice.js"
 import refusedTurnsExtension, { applyRefusalNoticeRenderingPatch } from "./extensions/refused-turns.js"
 import remoteRunExtension from "./extensions/remote-run/index.js"
 import requestTimingExtension from "./extensions/request-timing.js"
+import { responseRecoveryExtension } from "./extensions/response-recovery.js"
 import sessionMemoryStatsExtension from "./extensions/session-memory-stats.js"
 import sessionMetadataExtension from "./extensions/session-metadata/index.js"
 import sessionNameExtension from "./extensions/session-name.js"
@@ -993,6 +994,7 @@ async function cliMain(): Promise<void> {
 				// the concrete pick, re-sync capabilities, and (main session) install the
 				// catalog-driven Auto default.
 				autoModelRoutingExtension,
+				responseRecoveryExtension,
 				...enabledExtensionFactories([
 					{ id: "extensions.claude-code-skills", factory: (pi) => claudeCodeSkillsExtension(pi, configuredSkillPaths) },
 				] satisfies ManagedExtensionFactory[]),

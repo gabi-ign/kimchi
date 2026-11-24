@@ -43,6 +43,7 @@ import type { ModelRole } from "../../orchestration/model-registry/types.js"
 import { loadProjectContextFiles } from "../../prompt-construction/context-files.js"
 import { pinnedLanguageSection } from "../../prompt-construction/system-prompt.js"
 import requestTimingExtension from "../../request-timing.js"
+import { responseRecoveryExtension } from "../../response-recovery.js"
 import type { SkillTriggerHit } from "../../skills-manager/skill-triggers.js"
 import telemetryExtension from "../../telemetry/index.js"
 import { COST_PER_PR_RESOURCE_ID } from "../../work-attribution/resource.js"
@@ -1245,6 +1246,7 @@ export function buildInlineExtensionFactories(deps: InlineExtensionFactoryDeps):
 			: []),
 		requestTimingExtension,
 		...autoExtensionFactories,
+		responseRecoveryExtension,
 		bashExtension,
 		infrastructureBreakerExtension,
 		codexCorrelationExtension,

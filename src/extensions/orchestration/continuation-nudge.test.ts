@@ -193,6 +193,12 @@ describe("ContinuationNudge.evaluateTurn", () => {
 		expect(guard.evaluateTurn(error)).toBe(false)
 	})
 
+	it("does not nudge a truncated turn; the length handler owns its one continuation", () => {
+		const guard = new ContinuationNudge()
+		simulateSessionWithPriorToolCall(guard)
+		expect(guard.evaluateTurn({ ...textOnlyMessage, stopReason: "length" as const })).toBe(false)
+	})
+
 	it("does not consume a nudge slot when the turn was a provider error", () => {
 		// An error turn must not decrement the per-cycle budget — a subsequent
 		// legitimate text-only turn in the same cycle should still get its nudge.
@@ -792,10 +798,11 @@ describe("EmptyTurnNudge", () => {
 		expect(guard.evaluateTurn(emptyMessage)).toBe(false)
 	})
 
-	it("does not nudge when the user aborted the turn (stopReason: aborted)", () => {
+	it("does not nudge when the user aborted or an answer was truncated", () => {
 		const guard = new EmptyTurnNudge()
 		const aborted = { ...emptyMessage, stopReason: "aborted" as const }
 		expect(guard.evaluateTurn(aborted)).toBe(false)
+		expect(guard.evaluateTurn({ ...emptyMessage, stopReason: "length" as const })).toBe(false)
 	})
 
 	describe("provider error suppression", () => {

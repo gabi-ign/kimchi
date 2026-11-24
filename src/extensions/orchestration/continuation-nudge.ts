@@ -76,11 +76,9 @@ export const EMPTY_TURN_NUDGE_TEXT = markHarnessSteer(
 	"If you have finished, please summarize the result for the user. Otherwise, continue with the next tool call.",
 )
 
-/** Stop reasons that should never trigger a nudge. Both `aborted` (user
- *  cancelled) and `error` (provider failure) are terminal for this turn —
- *  nudging would either disrespect the user's intent or re-queue a followUp
- *  message that keeps the agent loop alive on a non-retryable error. */
-const NON_NUDGE_STOP_REASONS = new Set(["aborted", "error"])
+/** Stop reasons that should never trigger a nudge. `length` belongs to the
+ *  single lower-effort recovery in response-recovery instead. */
+const NON_NUDGE_STOP_REASONS = new Set(["aborted", "error", "length"])
 
 /** Returns true when the message's stop reason means the turn is terminal
  *  and must not be nudged (user abort or provider error). */
