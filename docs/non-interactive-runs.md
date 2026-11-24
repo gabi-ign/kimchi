@@ -16,7 +16,7 @@ Kimchi boolean flags never take a separate value. `--auto`, `--yolo`, `--memory`
 
 Before pi parses argv, `normalizeBooleanFlagArgs` (`src/cli-args.ts`) rewrites a bare Kimchi-only boolean flag to `--flag=true`. Without this, pi treats the next non-flag token as the flag's value and the positional prompt is lost. Normalization is skipped after `--`, and flags already written with `=` are left alone.
 
-The explicit forms stay valid and are the way to turn a flag off:
+The explicit forms stay valid. `--flag=true` is equivalent to the bare flag. To keep a flag off, omit it. `--flag=false` is honored only by flags Kimchi parses itself (`--auto`, `--yolo`, `--plan`, `--pr-watch`, `--no-auto-update`). Extension-read flags such as `--dangerously-skip-permissions`, `--ferment-oneshot`, `--init-git` and `--debug-prompts` currently treat any `=value` as on.
 
 ```sh
 kimchi --print --auto=true "do the work"
@@ -33,9 +33,9 @@ Flags that should parse but not appear in `--help` set `hidden: true` in the cat
 
 `src/cli-args.test.ts` enforces this. The "extension flag registration parity" test fails if any literal `registerFlag` call lacks a matching catalog entry, or its type differs. When you add a flag, add it to `CLI_OPTIONS` in the same change.
 
-## Outcome errors
+## Outcome errors (planned)
 
-This is the shared outcome contract for non-interactive runs, defined by the Bug B guard (B1). It is a contract for that work. The boolean-flag change itself does not implement exit 2 or exit 3 handling.
+This is the planned outcome contract for non-interactive runs, defined by an upcoming non-interactive outcome guard. The boolean-flag change itself does not implement exit 2 or exit 3 handling. Until the guard ships, a run with no prompt or no final answer can still exit `0` with empty output.
 
 The guard only replaces a silent exit `0`. If anything else already set a nonzero code, it does nothing.
 
