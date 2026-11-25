@@ -81,7 +81,11 @@ import {
 } from "../prompt-construction/tool-visibility.js"
 import { buildRemotePlanPromptWithIntent } from "../remote-run/prompt-builder.js"
 import { isRemoteRunEnabled, runCloudAgent } from "../remote-run/runner.js"
-import { type ReviewPermissionPolicy, reviewApprovalPresentation } from "../review-runner/execution.js"
+import {
+	isReviewResultSubmissionTool,
+	type ReviewPermissionPolicy,
+	reviewApprovalPresentation,
+} from "../review-runner/execution.js"
 import { isRawInputCaptureActive } from "../shared-input.js"
 import { isStaleCtxError } from "../stale-ctx.js"
 import { markHarnessSteer } from "../steer-marker.js"
@@ -2210,6 +2214,12 @@ function registerPermissions(pi: ExtensionAPI, options: GateOptions): void {
 				}
 
 				if (mode === "plan") {
+					// Review result submissions are coordinator-owned output, not worktree
+					// files or scripts. Other review tools (run_review_*) remain gated.
+					if (options.role === "worker" && isReviewResultSubmissionTool(toolName)) {
+						emitToolDecision(pi, event, mode, "accept", "preapproved")
+						return undefined
+					}
 					if (toolName === "bash") {
 						const command = typeof input.command === "string" ? input.command : ""
 						// Read-only doc-cli verbs count as read-only here too, but only
