@@ -13,6 +13,7 @@ const CATALOG = [
 	{
 		slug: "alpha",
 		displayName: "Alpha",
+		description: "Alpha model description",
 		provider: "fake",
 		reasoning: true,
 		input: ["text"],
@@ -120,6 +121,14 @@ function currentEffort(response: unknown): string | undefined {
 function currentModel(response: unknown): string | undefined {
 	const options = (response as { configOptions?: acp.SessionConfigOption[] }).configOptions
 	return options?.find((option) => option.id === "model")?.currentValue
+}
+
+function modelRows(response: unknown): acp.SessionConfigSelectOption[] {
+	const options = (response as { configOptions?: acp.SessionConfigOption[] }).configOptions
+	const model = options?.find((option) => option.id === "model")
+	return model?.type === "select"
+		? model.options.filter((option): option is acp.SessionConfigSelectOption => "value" in option)
+		: []
 }
 
 async function newEffortSession(fixture: AcpFixture, appMode: "chat" | "design" | "code") {
@@ -285,6 +294,99 @@ describe("ACP integration — model Effort persistence", () => {
 		await expect(setFreshEffort(fixture, session.sessionId, "chat", ALPHA_REF, "max")).rejects.toMatchObject({
 			code: -32601,
 		})
+		expect(readDefaults(fixture.homeDir)).toEqual({ chat: { [ALPHA_REF]: "max" } })
+	})
+})
+
+describe("ACP integration — model Effort metadata", () => {
+	it("negotiates and refreshes actual row values through edits, switching, and load", async () => {
+		const fixture = await start({
+			artifactName: "model-effort-metadata",
+			models: CATALOG,
+			defaultModel: "alpha",
+			responses: [],
+			clientMeta: MODEL_EFFORT_META,
+			seedHome: (home) => seedDefaults(home, { chat: { [ALPHA_REF]: "low", [BETA_REF]: "max" } }),
+		})
+		expect(fixture.initializeResponse.agentCapabilities._meta).toMatchObject(MODEL_EFFORT_META)
+
+		const created = await newEffortSession(fixture, "chat")
+		expect(created.configOptions?.find((option) => option.id === "reasoning_effort")?.category).toBe("model_config")
+		const alpha = modelRows(created).find((option) => option.value === ALPHA_REF)
+		expect(alpha).toMatchObject({
+			description: "Alpha model description",
+			_meta: {
+				"kimchi.dev": {
+					modelEffort: {
+						availability: "multiple",
+						levels: [
+							{ value: "low", name: "Low", description: "Routine changes, small fixes" },
+							{ value: "high", name: "High", description: "Complex features, tricky bugs" },
+							{ value: "max", name: "Max", description: "Hardest problems; the slowest, most costly" },
+						],
+						currentValue: "low",
+						defaultValue: "low",
+						searchAliases: ["alpha", "Alpha", "fake"],
+						virtual: null,
+					},
+				},
+			},
+		})
+		expect(modelRows(created).find((option) => option.value === BETA_REF)).toMatchObject({
+			_meta: {
+				"kimchi.dev": {
+					modelEffort: {
+						availability: "multiple",
+						levels: [{ value: "low" }, { value: "high" }],
+						currentValue: "high",
+						defaultValue: "high",
+					},
+				},
+			},
+		})
+
+		const edited = await setFreshEffort(fixture, created.sessionId, "chat", ALPHA_REF, "high")
+		expect(modelRows(edited).find((option) => option.value === ALPHA_REF)).toMatchObject({
+			_meta: { "kimchi.dev": { modelEffort: { currentValue: "high", defaultValue: "high" } } },
+		})
+		const switched = await selectModel(fixture, created.sessionId, BETA_REF)
+		expect(modelRows(switched).find((option) => option.value === ALPHA_REF)).toMatchObject({
+			_meta: { "kimchi.dev": { modelEffort: { currentValue: "high", defaultValue: "high" } } },
+		})
+		expect(modelRows(switched).find((option) => option.value === BETA_REF)).toMatchObject({
+			_meta: { "kimchi.dev": { modelEffort: { currentValue: "high", defaultValue: "high" } } },
+		})
+
+		const loaded = await fixture.conn.request("session/load", {
+			sessionId: created.sessionId,
+			cwd: fixture.workDir,
+			mcpServers: [],
+			_meta: { "kimchi.dev": { appMode: "chat" } },
+		})
+		expect(modelRows(loaded).find((option) => option.value === ALPHA_REF)).toMatchObject({
+			_meta: { "kimchi.dev": { modelEffort: { currentValue: "high", defaultValue: "high" } } },
+		})
+	})
+
+	it("keeps the complete legacy wire view for clients without modelEffort", async () => {
+		const fixture = await start({
+			artifactName: "model-effort-metadata-no-opt-in",
+			models: CATALOG,
+			defaultModel: "alpha",
+			settings: { defaultThinkingLevel: "high" },
+			responses: [],
+			seedHome: (home) => seedDefaults(home, { chat: { [ALPHA_REF]: "max" } }),
+		})
+
+		const created = await newEffortSession(fixture, "chat")
+		expect(created.configOptions?.find((option) => option.id === "reasoning_effort")?.category).toBe("thought_level")
+		expect(currentEffort(created)).toBe("high")
+		for (const row of modelRows(created)) expect(row).not.toHaveProperty("_meta")
+
+		const edited = await setStandardEffort(fixture, created.sessionId, "low")
+		expect(currentEffort(edited)).toBe("low")
+		expect(edited.configOptions?.find((option) => option.id === "reasoning_effort")?.category).toBe("thought_level")
+		for (const row of modelRows(edited)) expect(row).not.toHaveProperty("_meta")
 		expect(readDefaults(fixture.homeDir)).toEqual({ chat: { [ALPHA_REF]: "max" } })
 	})
 })

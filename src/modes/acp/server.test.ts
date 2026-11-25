@@ -223,7 +223,13 @@ import {
 	vaultForSession,
 } from "../../extensions/pii-redaction/vault.js"
 import { applyWriteTodos, clearTodoStore } from "../../extensions/todos/store.js"
-import { __clearModelThinkingLevelsForTest, registerModelThinkingLevels, updateModelsConfig } from "../../models.js"
+import {
+	__clearModelDescriptionsForTest,
+	__clearModelThinkingLevelsForTest,
+	registerModelDescription,
+	registerModelThinkingLevels,
+	updateModelsConfig,
+} from "../../models.js"
 import { syncOAuthCredentialToKimchiProviders } from "../../pi-auth.js"
 import { discoveredSelfHostedRegion, regionEndpoints } from "../../regions.js"
 import {
@@ -296,6 +302,7 @@ interface FakeModel {
 	/** Thinking surface for the reasoning_effort config option tests. */
 	reasoning?: boolean
 	thinkingLevelMap?: Record<string, string | null>
+	providerName?: string
 }
 
 /** Options passed through `AgentSession.prompt()` to the fake. */
@@ -362,16 +369,9 @@ class FakeAgentSession {
 	// Credential state for the -32000 conversions; false = keyless machine.
 	authConfigured = true
 	modelRegistry = {
-		getAvailable: () =>
-			this.model
-				? [
-						{
-							provider: this.model.provider,
-							id: this.model.id,
-							name: this.model.name ?? this.model.id,
-						},
-					]
-				: [],
+		// A real registry preserves the model's complete reasoning surface;
+		// the ACP row builder uses it for per-model Effort availability.
+		getAvailable: () => (this.model ? [this.model] : []),
 		find: (provider: string, id: string) =>
 			this.modelRegistry.getAvailable().find((m) => m.provider === provider && m.id === id),
 		hasConfiguredAuth: (_model: { provider: string }) => this.authConfigured,
@@ -488,6 +488,13 @@ class FakeAgentSession {
 		this.model = model
 	}
 
+	// Harness settings used to predict a normal model switch's Effort.
+	defaultThinkingLevel: string | undefined
+	modelThinkingLevels: Record<string, string> = {}
+	settingsManager = {
+		getDefaultThinkingLevel: () => this.defaultThinkingLevel,
+		getModelThinkingLevel: (provider: string, modelId: string) => this.modelThinkingLevels[`${provider}/${modelId}`],
+	}
 	// Reasoning-effort seam: the current level plus a tape of every
 	// setThinkingLevel call, mirroring the real AgentSession getter/setter.
 	thinkingLevel = "off"
@@ -10899,6 +10906,7 @@ describe("setSessionConfigOption", () => {
 		})
 
 		afterEach(() => {
+			__clearModelDescriptionsForTest()
 			__clearModelThinkingLevelsForTest()
 		})
 
@@ -11159,6 +11167,56 @@ describe("setSessionConfigOption", () => {
 			expect(writeModelEffortDefault).not.toHaveBeenCalled()
 		})
 
+		it("advertises row metadata for opted-in clients without changing legacy clients", async () => {
+			registerModelThinkingLevels("test/reasoner", ["low", "high", "max"])
+			vi.mocked(readModelEffortDefaults).mockReturnValue({ chat: { "test/reasoner": "low" } })
+			const optedIn = new FakeAgentSession("test-session-effort-metadata-opt-in")
+			optedIn.model = REASONING_MODEL
+			const optedInAgent = makeAgent(optedIn)
+			await optIntoModelEffort(optedInAgent)
+
+			const { configOptions } = await optedInAgent.newSession({
+				cwd: "/tmp",
+				mcpServers: [],
+				_meta: { "kimchi.dev": { appMode: "chat" } },
+			})
+
+			const model = configOptions?.find((option) => option.id === "model")
+			const rows = model?.type === "select" ? model.options : []
+			expect(rows).toHaveLength(1)
+			expect(rows[0]).toMatchObject({
+				value: "test/reasoner",
+				_meta: {
+					"kimchi.dev": {
+						modelEffort: {
+							availability: "multiple",
+							levels: [
+								{ value: "low", name: "Low", description: THINKING_LEVEL_DESCRIPTIONS.low },
+								{ value: "high", name: "High", description: THINKING_LEVEL_DESCRIPTIONS.high },
+								{ value: "max", name: "Max", description: THINKING_LEVEL_DESCRIPTIONS.max },
+							],
+							currentValue: "low",
+							defaultValue: "low",
+							searchAliases: ["reasoner", "Reasoner", "test"],
+							virtual: null,
+						},
+					},
+				},
+			})
+			expect(configOptions?.find((option) => option.id === "reasoning_effort")?.category).toBe("model_config")
+
+			const legacy = new FakeAgentSession("test-session-effort-metadata-legacy")
+			legacy.model = REASONING_MODEL
+			const legacyAgent = makeAgent(legacy)
+			const legacyResponse = await legacyAgent.newSession({ cwd: "/tmp", mcpServers: [] })
+			const legacyModel = legacyResponse.configOptions?.find((option) => option.id === "model")
+			const legacyRows = legacyModel?.type === "select" ? legacyModel.options : []
+			expect(legacyRows[0]).not.toHaveProperty("_meta")
+			expect(legacyResponse.configOptions?.find((option) => option.id === "reasoning_effort")?.category).toBe(
+				"thought_level",
+			)
+		})
+
 		it("advertises the curated selection with the session level as currentValue", async () => {
 			registerModelThinkingLevels("test/reasoner", ["low", "high", "max"])
 			const fake = new FakeAgentSession("test-session-effort-advertise")
@@ -11182,6 +11240,91 @@ describe("setSessionConfigOption", () => {
 				{ value: "high", name: "High", description: THINKING_LEVEL_DESCRIPTIONS.high },
 				{ value: "max", name: "Max", description: THINKING_LEVEL_DESCRIPTIONS.max },
 			])
+		})
+
+		it("distinguishes fixed, provider-controlled, unsupported, and routed model rows", async () => {
+			const fixed: FakeModel = {
+				...REASONING_MODEL,
+				id: "fixed",
+				name: "Fixed",
+				providerName: "Test Provider",
+			}
+			const providerControlled = { ...REASONING_MODEL, id: "provider", name: "Provider Controlled" }
+			const unsupported = { ...REASONING_MODEL, id: "plain", name: "Plain", reasoning: false }
+			const auto = { ...REASONING_MODEL, provider: "kimchi-dev", id: "auto", name: "Auto" }
+			const autoBeta = { ...REASONING_MODEL, provider: "kimchi-dev", id: "auto-beta", name: "Auto Beta" }
+			const models = [fixed, providerControlled, unsupported, auto, autoBeta]
+			registerModelThinkingLevels("test/fixed", ["high"])
+			registerModelThinkingLevels("test/provider", [])
+			registerModelDescription("test/fixed", "A fixed-level model.")
+			const fake = new FakeAgentSession("test-session-effort-metadata-matrix")
+			fake.model = auto
+			fake.modelRegistry = {
+				...fake.modelRegistry,
+				getAvailable: () => models,
+				find: (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id),
+			}
+			setAutoRoutingState(fake.sessionId, {
+				status: "resolved",
+				model: { provider: "test", id: "resolved-model", name: "Resolved Model" } as Model<string>,
+				requestedId: "auto",
+			})
+			onTestFinished(() => clearAutoRoutingState(fake.sessionId))
+			const agent = makeAgent(fake)
+			await optIntoModelEffort(agent)
+
+			const { configOptions } = await agent.newSession({
+				cwd: "/tmp",
+				mcpServers: [],
+				_meta: { "kimchi.dev": { appMode: "code" } },
+			})
+
+			const model = configOptions?.find((option) => option.id === "model")
+			const rows = model?.type === "select" ? model.options : []
+			const row = (value: string) => rows.find((option) => "value" in option && option.value === value)
+			expect(row("test/fixed")).toMatchObject({
+				description: "A fixed-level model.",
+				_meta: {
+					"kimchi.dev": {
+						modelEffort: {
+							availability: "fixed",
+							levels: [{ value: "high", name: "High", description: THINKING_LEVEL_DESCRIPTIONS.high }],
+							currentValue: "high",
+							defaultValue: null,
+							searchAliases: ["fixed", "Fixed", "test", "Test Provider"],
+							virtual: null,
+						},
+					},
+				},
+			})
+			expect(row("test/provider")).toMatchObject({
+				_meta: {
+					"kimchi.dev": {
+						modelEffort: { availability: "provider-controlled", currentValue: null, defaultValue: null },
+					},
+				},
+			})
+			expect(row("test/plain")).toMatchObject({
+				_meta: {
+					"kimchi.dev": { modelEffort: { availability: "unsupported", currentValue: null, defaultValue: null } },
+				},
+			})
+			expect(row("kimchi-dev/auto")).toMatchObject({
+				name: "Auto (resolved-model)",
+				description: "Picks the best model for your tasks automatically.",
+				_meta: {
+					"kimchi.dev": {
+						modelEffort: { availability: "routed", currentValue: null, defaultValue: null, virtual: "auto" },
+					},
+				},
+			})
+			expect(row("kimchi-dev/auto-beta")).toMatchObject({
+				_meta: {
+					"kimchi.dev": {
+						modelEffort: { availability: "routed", currentValue: null, defaultValue: null, virtual: "other" },
+					},
+				},
+			})
 		})
 
 		it("sets a valid level and reports the new current value", async () => {
@@ -11272,6 +11415,58 @@ describe("setSessionConfigOption", () => {
 
 			const effort = configOptions?.find((o) => o.id === "reasoning_effort")
 			expect(effort?.currentValue).toBe("high")
+		})
+
+		it("refreshes every row's actual value after Effort edits and model switches", async () => {
+			const other = { ...REASONING_MODEL, id: "other", name: "Other" }
+			const models = [REASONING_MODEL, other]
+			registerModelThinkingLevels("test/reasoner", ["low", "high", "max"])
+			registerModelThinkingLevels("test/other", ["low", "high"])
+			vi.mocked(readModelEffortDefaults).mockReturnValue({
+				chat: { "test/reasoner": "low", "test/other": "max" },
+			})
+			const fake = new FakeAgentSession("test-session-effort-row-updates")
+			fake.model = REASONING_MODEL
+			fake.thinkingLevel = "high"
+			fake.defaultThinkingLevel = "low"
+			fake.modelRegistry = {
+				...fake.modelRegistry,
+				getAvailable: () => models,
+				find: (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id),
+			}
+			const agent = makeAgent(fake)
+			await optIntoModelEffort(agent)
+			await agent.newSession({ cwd: "/tmp", mcpServers: [], _meta: { "kimchi.dev": { appMode: "chat" } } })
+
+			await agent.setSessionConfigOption({ sessionId: fake.sessionId, configId: "reasoning_effort", value: "max" })
+			const response = await agent.setSessionConfigOption({
+				sessionId: fake.sessionId,
+				configId: "model",
+				value: "test/other",
+			})
+
+			const model = response.configOptions.find((option) => option.id === "model")
+			const rows = model?.type === "select" ? model.options : []
+			expect(rows).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						value: "test/reasoner",
+						_meta: {
+							"kimchi.dev": {
+								modelEffort: expect.objectContaining({ currentValue: "max", defaultValue: "low" }),
+							},
+						},
+					}),
+					expect.objectContaining({
+						value: "test/other",
+						_meta: {
+							"kimchi.dev": {
+								modelEffort: expect.objectContaining({ currentValue: "high", defaultValue: "high" }),
+							},
+						},
+					}),
+				]),
+			)
 		})
 
 		it("refreshes the option after a model switch", async () => {
