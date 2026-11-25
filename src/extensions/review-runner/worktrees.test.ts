@@ -1,10 +1,11 @@
 import { execFileSync, spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { reviewProcessStartIdentity } from "../review-command/owner-identity.js"
 import { parseReviewTargetArgs } from "../review-targets/parser.js"
 import { resolveReviewTarget } from "../review-targets/resolve.js"
 import type { ExplicitReviewRequest, ResolvedReviewTarget } from "../review-targets/types.js"
@@ -177,6 +178,52 @@ describe("review worktree lifecycle", () => {
 		expect(existsSync(pool.runDir)).toBe(false)
 		expect(git(repo, "worktree", "list", "--porcelain")).not.toContain(worktree.path)
 		expect(refExists(repo, snapshotRef ?? "")).toBe(false)
+	})
+
+	it("reclaims dead manifest state after its repository is deleted", async () => {
+		writeFileSync(join(repo, "file.txt"), "deleted repository\n")
+		const target = await resolveReviewTarget(parseReviewTargetArgs(["working-tree"]) as ExplicitReviewRequest, {
+			root: repo,
+			contextDir,
+		})
+		const pool = await createReviewWorktreePool({ target, outputDir, rootDir })
+		const worktree = await pool.getWorktree("writer")
+		const canonicalRepository = realpathSync(repo)
+		rmSync(repo, { recursive: true, force: true })
+		const recovered = await recoverReviewWorktrees({ rootDir, olderThanMs: 0 })
+		expect(recovered).toHaveLength(1)
+		expect(recovered[0]).toMatchObject({ runDir: pool.runDir, repository: canonicalRepository })
+		expect(existsSync(pool.runDir)).toBe(false)
+		expect(existsSync(worktree.path)).toBe(false)
+	})
+
+	it("preserves worktrees and snapshot refs owned by another live process", async () => {
+		writeFileSync(join(repo, "file.txt"), "other live review\n")
+		const target = await resolveReviewTarget(parseReviewTargetArgs(["working-tree"]) as ExplicitReviewRequest, {
+			root: repo,
+			contextDir,
+		})
+		const pool = await createReviewWorktreePool({ target, outputDir, rootDir })
+		const worktree = await pool.getWorktree("writer")
+		const holder = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" })
+		const holderPid = holder.pid
+		if (holderPid === undefined) throw new Error("Live-holder process has no PID")
+		try {
+			const ownerStart = await reviewProcessStartIdentity(holderPid)
+			const manifestPath = join(pool.runDir, REVIEW_WORKTREE_TESTING.MANIFEST)
+			const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+			manifest.ownerPid = holderPid
+			manifest.ownerStart = ownerStart
+			writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+			await expect(recoverReviewWorktrees({ rootDir, olderThanMs: 0 })).resolves.toEqual([])
+			expect(existsSync(pool.runDir)).toBe(true)
+			expect(existsSync(worktree.path)).toBe(true)
+			expect(refExists(repo, target.scope.pinned.snapshotRef ?? "")).toBe(true)
+		} finally {
+			await pool.cleanup()
+			holder.kill("SIGKILL")
+			await new Promise<void>((resolve) => holder.once("close", () => resolve()))
+		}
 	})
 
 	it.each(["before-add", "after-add"] as const)("recovers a real crash %s registration", async (point) => {
