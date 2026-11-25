@@ -112,7 +112,7 @@ describe("ACP reversible redaction (token mode)", () => {
 			},
 		})
 
-		const session = await fixture.conn.newSession({ cwd: fixture.workDir, mcpServers: [] })
+		const session = await fixture.conn.request("session/new", { cwd: fixture.workDir, mcpServers: [] })
 		const first = await prompt(fixture, session.sessionId, `echo back ${email} verbatim`)
 		expect(first.stopReason).toBe("end_turn")
 
@@ -131,7 +131,7 @@ describe("ACP reversible redaction (token mode)", () => {
 			pretrustWorkDir: true,
 		})
 		try {
-			await second.conn.loadSession({ sessionId: session.sessionId, cwd: workDir, mcpServers: [] })
+			await second.conn.request("session/load", { sessionId: session.sessionId, cwd: workDir, mcpServers: [] })
 			const resumed = await prompt(second, session.sessionId, "what was that address again?")
 			expect(resumed.stopReason).toBe("end_turn")
 
