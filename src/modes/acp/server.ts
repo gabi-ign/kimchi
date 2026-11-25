@@ -45,7 +45,7 @@ import {
 	type SetSessionConfigOptionResponse,
 	type ToolCallContent,
 } from "@agentclientprotocol/sdk/unstable"
-import type { Api, AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai"
+import type { Api, AssistantMessage, ImageContent, Model, ModelThinkingLevel } from "@earendil-works/pi-ai"
 import type { OAuthCredentials } from "@earendil-works/pi-ai/oauth"
 import type { AgentSessionEvent, ExtensionUIContext } from "@earendil-works/pi-coding-agent"
 import {
@@ -174,7 +174,7 @@ import {
 	type SessionAppMode,
 	sessionAppModeFromMeta,
 } from "../../model-effort.js"
-import { applyOrganizationHeader, updateModelsConfig } from "../../models.js"
+import { applyOrganizationHeader, getModelDescription, updateModelsConfig } from "../../models.js"
 import { oauthConfigForRegion, ssoAvailableRegions } from "../../oauth-config.js"
 import { clearPiAuth, syncOAuthCredentialToKimchiProviders, syncPiAuth } from "../../pi-auth.js"
 import { clearProjectScopeTrust, setProjectScopeTrusted } from "../../project-scope-trust.js"
@@ -698,6 +698,19 @@ export class KimchiAcpAgent {
 		)
 	}
 
+	/** Every complete session configuration uses this one builder so setup,
+	 * model/Effort edits, loads and pushes advertise the same row metadata. */
+	private buildSessionConfigOptions(
+		record: SessionRecord,
+		defaultMode = this.getInitialPermissionMode(record.session).mode,
+	): SessionConfigOption[] {
+		return buildConfigOptions(
+			record.session,
+			defaultMode,
+			getClientOptedIntoModelEffort(this.clientCapabilities) ? record : undefined,
+		)
+	}
+
 	constructor(
 		private readonly conn: AgentContext,
 		options: RunAcpOptions,
@@ -1074,7 +1087,12 @@ export class KimchiAcpAgent {
 			const sessionId = session.sessionId
 			setSnapshotArtifactsOptIn(session.sessionManager, getClientOptedIntoArtifacts(this.clientCapabilities))
 			const uiContext = this.createUiContext(session)
-			ownFlagController = registerPermissionFlagController(session, initialMode, (params) => this.send(params))
+			ownFlagController = registerPermissionFlagController(
+				session,
+				initialMode,
+				(params) => this.send(params),
+				() => this.buildSessionConfigOptions(record, initialMode.mode),
+			)
 			// Build the record early so the ACP prompter can allocate ACP
 			// toolCallIds that match the ids later emitted by tool_execution_start.
 			// The unsubscribe placeholder is replaced after bindAcpExtensions so no
@@ -1124,7 +1142,7 @@ export class KimchiAcpAgent {
 			this.scheduleProjectTrustUpdate(sessionId)
 
 			this.restoreModelEffort(record)
-			const configOptions = buildConfigOptions(session, initialMode.mode)
+			const configOptions = this.buildSessionConfigOptions(record, initialMode.mode)
 			// Seed the tracker with what the client is about to receive, so the
 			// first message_start only re-publishes when the router's pick has
 			// actually changed the label.
@@ -1230,7 +1248,7 @@ export class KimchiAcpAgent {
 				throw RequestError.invalidParams(undefined, `unknown config option ${params.configId}`)
 		}
 		return {
-			configOptions: buildConfigOptions(record.session, this.getInitialPermissionMode(record.session).mode),
+			configOptions: this.buildSessionConfigOptions(record),
 		}
 	}
 
@@ -1288,7 +1306,7 @@ export class KimchiAcpAgent {
 		this.doSetThinkingLevel(record, effort)
 		writeModelEffortDefault(appMode, params.modelId, effort)
 		return {
-			configOptions: buildConfigOptions(record.session, this.getInitialPermissionMode(record.session).mode),
+			configOptions: this.buildSessionConfigOptions(record),
 		}
 	}
 
@@ -1378,7 +1396,7 @@ export class KimchiAcpAgent {
 			sessionId,
 			update: {
 				sessionUpdate: "config_option_update",
-				configOptions: buildConfigOptions(session, this.getInitialPermissionMode(session).mode),
+				configOptions: this.buildSessionConfigOptions(record),
 			},
 		})
 		return value
@@ -1412,7 +1430,7 @@ export class KimchiAcpAgent {
 			this.scheduleAvailableCommandsUpdate(sessionId)
 			this.scheduleProjectTrustUpdate(sessionId)
 
-			const configOptions = buildConfigOptions(existing.session, this.getInitialPermissionMode(existing.session).mode)
+			const configOptions = this.buildSessionConfigOptions(existing)
 			return {
 				configOptions,
 			}
@@ -1467,7 +1485,12 @@ export class KimchiAcpAgent {
 			setSnapshotArtifactsOptIn(session.sessionManager, getClientOptedIntoArtifacts(this.clientCapabilities))
 
 			const uiContext = this.createUiContext(session)
-			ownFlagController = registerPermissionFlagController(session, initialMode, (params) => this.send(params))
+			ownFlagController = registerPermissionFlagController(
+				session,
+				initialMode,
+				(params) => this.send(params),
+				() => this.buildSessionConfigOptions(record, initialMode.mode),
+			)
 			// Build the record early so the ACP prompter can allocate ACP
 			// toolCallIds that match the ids later emitted by tool_execution_start.
 			// The unsubscribe placeholder is replaced after bindAcpExtensions so no
@@ -1527,7 +1550,7 @@ export class KimchiAcpAgent {
 			this.scheduleProjectTrustUpdate(sessionId)
 
 			this.restoreModelEffort(record)
-			const configOptions = buildConfigOptions(session, initialMode.mode)
+			const configOptions = this.buildSessionConfigOptions(record, initialMode.mode)
 			// Same seeding as newSession (see there) — a resumed Auto session
 			// hydrates its pick before this point, so the label is already final.
 			record.lastModelOptionName = autoOptionName(configOptions)
@@ -3558,7 +3581,7 @@ export class KimchiAcpAgent {
 	 * `lastModelOptionName` with the label the client already received.
 	 */
 	private publishModelOptionIfChanged(sessionId: string, entry: SessionRecord): void {
-		const configOptions = buildConfigOptions(entry.session, this.getInitialPermissionMode(entry.session).mode)
+		const configOptions = this.buildSessionConfigOptions(entry)
 		const autoName = autoOptionName(configOptions)
 		if (!autoName || autoName === entry.lastModelOptionName) return
 		entry.lastModelOptionName = autoName
@@ -4154,9 +4177,14 @@ export function buildPermissionsConfigOption(currentMode: PermissionMode): Sessi
  * Builds a SessionConfigOption for the model setting.
  * Exported for testing.
  */
-type AgentSessionModelConfig = Pick<AgentSession, "model" | "modelRuntime" | "sessionId" | "sessionManager"> & {
+type AgentSessionModelConfig = Pick<
+	AgentSession,
+	"model" | "modelRuntime" | "sessionId" | "sessionManager" | "settingsManager" | "thinkingLevel"
+> & {
 	modelRegistry?: ModelRegistry
 }
+
+type ModelEffortMetadataContext = Pick<SessionRecord, "appMode" | "effortByModel">
 
 function getSessionModelRegistry(
 	session: Pick<AgentSession, "modelRuntime"> & { modelRegistry?: ModelRegistry },
@@ -4191,18 +4219,29 @@ function autoModelOption(model: Model<Api>, sessionId: string): SessionConfigSel
 	return { value: refFromModel(model), name: baseName, description }
 }
 
-export function buildModelConfigOption(session: AgentSessionModelConfig): SessionConfigOption {
+export function buildModelConfigOption(
+	session: AgentSessionModelConfig,
+	effort?: ModelEffortMetadataContext,
+): SessionConfigOption {
 	const modelRegistry = getSessionModelRegistry(session)
 	// Regular models carry no description today; deprecated ones get the
 	// picker marker (same gating as the session-start toast) so ACP clients
 	// see the deprecation before selecting, mirroring the TUI's /model column.
 	const deprecationMarkers = collectDeprecationMarkers(join(loadKimchiConfig().agentConfigDir, "models.json"))
 	const options: SessionConfigSelectOption[] = modelRegistry.getAvailable().map((m) => {
-		if (isAutoRoutedModel(m)) return autoModelOption(m, session.sessionId)
-		const marker = deprecationMarkers.get(m.id)
-		return marker
-			? { value: refFromModel(m), name: m.name, description: marker }
-			: { value: refFromModel(m), name: m.name }
+		let option: SessionConfigSelectOption
+		if (isAutoRoutedModel(m)) {
+			option = autoModelOption(m, session.sessionId)
+		} else {
+			const modelId = refFromModel(m)
+			const description = effort
+				? (getModelDescription(modelId) ?? deprecationMarkers.get(m.id))
+				: deprecationMarkers.get(m.id)
+			option = description ? { value: modelId, name: m.name, description } : { value: modelId, name: m.name }
+		}
+		return effort
+			? { ...option, _meta: kimchiDevMetaOf({ modelEffort: modelEffortMetadata(session, m, effort) }) }
+			: option
 	})
 	options.sort((a, b) => a.value.localeCompare(b.value))
 	// biome-ignore lint/style/noNonNullAssertion: we assert model availability before session is created/loaded via assertSessionHasModel.
@@ -4239,7 +4278,18 @@ function isCanonicalThinkingLevel(value: string): value is AgentSession["thinkin
  */
 export type AgentSessionThinkingConfig = Pick<AgentSession, "model" | "thinkingLevel">
 
-export function buildThinkingConfigOption(session: AgentSessionThinkingConfig): SessionConfigOption | null {
+function thinkingLevelConfigOptions(levels: readonly ModelThinkingLevel[]): SessionConfigSelectOption[] {
+	return levels.map((level) => ({
+		value: level,
+		name: thinkingLevelName(level),
+		description: thinkingLevelDescription(level),
+	}))
+}
+
+export function buildThinkingConfigOption(
+	session: AgentSessionThinkingConfig,
+	category: "model_config" | "thought_level" = "thought_level",
+): SessionConfigOption | null {
 	if (!session.model) return null
 	const selection = thinkingSelection(session.model)
 	if (selection.mode !== "levels" || selection.selectable.length === 0) return null
@@ -4247,14 +4297,10 @@ export function buildThinkingConfigOption(session: AgentSessionThinkingConfig): 
 		id: "reasoning_effort",
 		name: "Reasoning Effort",
 		type: "select",
-		category: "thought_level",
+		category,
 		description: "How much the model reasons before answering. Available levels depend on the selected model.",
 		currentValue: clampToSelection(session.thinkingLevel, selection),
-		options: selection.selectable.map((level) => ({
-			value: level,
-			name: thinkingLevelName(level),
-			description: thinkingLevelDescription(level),
-		})),
+		options: thinkingLevelConfigOptions(selection.selectable),
 	}
 }
 
@@ -4275,10 +4321,66 @@ function autoOptionName(configOptions: SessionConfigOption[]): string | undefine
 	return autoNames.length > 0 ? autoNames.join(" · ") : undefined
 }
 
-function buildConfigOptions(session: AgentSession, defaultMode: PermissionMode): SessionConfigOption[] {
+function modelSearchAliases(model: Model<Api>): string[] {
+	const providerName =
+		"providerName" in model && typeof model.providerName === "string" ? model.providerName : undefined
+	return [...new Set([model.id, model.name, model.provider, ...(providerName ? [providerName] : [])])]
+}
+
+function modelEffortMetadata(session: AgentSessionModelConfig, model: Model<Api>, context: ModelEffortMetadataContext) {
+	const modelId = refFromModel(model)
+	if (isAutoRoutedModel(model)) {
+		return {
+			availability: "routed",
+			currentValue: null,
+			defaultValue: null,
+			searchAliases: modelSearchAliases(model),
+			virtual: model.id === "auto" ? "auto" : "other",
+		}
+	}
+
+	const selection = thinkingSelection(model)
+	const configuredDefault = getModelEffortDefault(context.appMode, modelId)
+	const shared = {
+		defaultValue: configuredDefault ? clampToSelection(configuredDefault, selection) : null,
+		searchAliases: modelSearchAliases(model),
+		virtual: null,
+	}
+	if (selection.mode !== "levels" || selection.selectable.length === 0) {
+		return {
+			...shared,
+			availability:
+				selection.mode === "none" && selection.noneReason === "curated-none" ? "provider-controlled" : "unsupported",
+			currentValue: null,
+			defaultValue: null,
+		}
+	}
+
+	const currentModelId = session.model ? refFromModel(session.model) : undefined
+	const harnessFallback =
+		session.settingsManager.getModelThinkingLevel(model.provider, model.id) ??
+		session.settingsManager.getDefaultThinkingLevel() ??
+		session.thinkingLevel
+	const requested =
+		currentModelId === modelId
+			? session.thinkingLevel
+			: (context.effortByModel.get(modelId) ?? configuredDefault ?? harnessFallback)
+	return {
+		...shared,
+		availability: selection.selectable.length > 1 ? "multiple" : "fixed",
+		levels: thinkingLevelConfigOptions(selection.selectable),
+		currentValue: clampToSelection(requested, selection),
+	}
+}
+
+function buildConfigOptions(
+	session: AgentSession,
+	defaultMode: PermissionMode,
+	effort?: ModelEffortMetadataContext,
+): SessionConfigOption[] {
 	const mode = getPermissionMode(session.sessionId)?.mode ?? defaultMode
-	const options = [buildPermissionsConfigOption(mode), buildModelConfigOption(session)]
-	const thinking = buildThinkingConfigOption(session)
+	const options = [buildPermissionsConfigOption(mode), buildModelConfigOption(session, effort)]
+	const thinking = buildThinkingConfigOption(session, effort ? "model_config" : "thought_level")
 	if (thinking) options.push(thinking)
 	return options
 }
@@ -4391,6 +4493,7 @@ function registerPermissionFlagController(
 	session: AgentSession,
 	initialMode: PermissionModeState,
 	send: (params: SessionNotification) => void,
+	buildCurrentConfigOptions: () => SessionConfigOption[] = () => buildConfigOptions(session, initialMode.mode),
 ): SessionPermissionFlagController {
 	const permissionFlagController = createSessionPermissionFlagController({
 		mode: initialMode,
@@ -4403,7 +4506,7 @@ function registerPermissionFlagController(
 			sessionId: session.sessionId,
 			update: {
 				sessionUpdate: "config_option_update",
-				configOptions: buildConfigOptions(session, initialMode.mode),
+				configOptions: buildCurrentConfigOptions(),
 			},
 		})
 	})
