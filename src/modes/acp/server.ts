@@ -159,6 +159,7 @@ import { getPRWatcher } from "../../extensions/pr-watch/index.js"
 import { formatPRWatchStatus } from "../../extensions/pr-watch/presentation.js"
 import { setPRMonitoringPermitted } from "../../extensions/pr-watch/session-policy.js"
 import { isRefusal, refusalText } from "../../extensions/refused-turns.js"
+import { cancelActiveReview } from "../../extensions/review-command/active-runs.js"
 import { modelSupportsImages } from "../../extensions/vision-support.js"
 import { configureHttpIdleTimeout } from "../../http/proxy.js"
 import { isKimchiProvider, KIMCHI_PROVIDER_ID } from "../../kimchi-provider.js"
@@ -1840,6 +1841,10 @@ export class KimchiAcpAgent {
 		// drain them. Mirrors the TUI's Escape → clearAllQueues() behaviour.
 		const droppedQueue = this.drainQueue(entry)
 		notifyDroppedQueue(this.conn, params.sessionId, droppedQueue, "cancelled")
+		// Extension commands do not create a Pi model turn. Cancel any active
+		// review first so its finalization and cleanup complete before the
+		// cancelled prompt response is released to the client.
+		await cancelActiveReview(params.sessionId)
 		await entry.session.abort()
 		// Held plan-review turn still in the review pause: abort() above was a
 		// no-op (nothing is streaming) and no agent_settled is coming — finalize
@@ -2073,6 +2078,7 @@ export class KimchiAcpAgent {
 		// against the disposed session.
 		if (entry.turn || entry.unsolicitedTurn) {
 			try {
+				await cancelActiveReview(sessionId, "Review session closing")
 				await entry.session.abort()
 			} catch {
 				// Closing is best-effort cleanup; still resolve the pending prompt

@@ -8,6 +8,8 @@ import type {
 } from "@earendil-works/pi-coding-agent"
 import { createBashToolDefinition, createLocalBashOperations } from "@earendil-works/pi-coding-agent"
 import { isInSandboxCluster } from "../../utils/sandbox.js"
+import { acquireHeadlessCommandSlot } from "./headless-command-limit.js"
+import { reviewInheritedProcessOperations } from "./inherited-process-operations.js"
 import { isDirectInstallCommand } from "./install-command.js"
 import { detectReviewNetworkBoundary, offlineEnvironment, type ReviewNetworkBoundary } from "./network-boundary.js"
 import type { ReviewWorktree } from "./types.js"
@@ -109,6 +111,7 @@ export interface ReviewCommandRecord {
 
 export interface ReviewExecutionController extends ReviewPermissionPolicy {
 	readonly mode: ReviewExecutionMode
+	readonly executionGroup: string
 	readonly worktree: ReviewWorktree
 	readonly records: readonly ReviewCommandRecord[]
 	environment(base: NodeJS.ProcessEnv, toolCallId?: string): NodeJS.ProcessEnv
@@ -131,6 +134,8 @@ export interface ReviewExecutionPolicyOptions {
 export interface ReviewExecutionControllerOptions extends ReviewExecutionPolicyOptions {
 	mode: ReviewExecutionMode
 	worktree: ReviewWorktree
+	/** Shared across every reviewer and the routine-check worktree for one panel. */
+	executionGroup?: string
 	operations?: BashOperations
 	outputLimit?: number
 }
@@ -166,6 +171,10 @@ class ExecutionController implements ReviewExecutionController {
 
 	get mode(): ReviewExecutionMode {
 		return this.options.mode
+	}
+
+	get executionGroup(): string {
+		return this.options.executionGroup ?? this.options.worktree.path
 	}
 
 	get worktree(): ReviewWorktree {
@@ -515,6 +524,20 @@ export async function prepareReviewCommand(
 	}
 }
 
+async function withCommandSlot<T>(
+	controller: ReviewExecutionController,
+	signal: AbortSignal | undefined,
+	operation: () => Promise<T>,
+): Promise<T> {
+	if (controller.mode !== "headless") return operation()
+	const release = await acquireHeadlessCommandSlot(controller.executionGroup, signal)
+	try {
+		return await operation()
+	} finally {
+		release()
+	}
+}
+
 export async function executeReviewCommand(
 	controller: ReviewExecutionController,
 	request: ReviewCommandRequest & { operations?: BashOperations; outputLimit?: number },
@@ -527,14 +550,18 @@ export async function executeReviewCommand(
 		request.signal?.throwIfAborted()
 		preparation = await prepareReviewCommand(controller, request, startedAt)
 		if ("status" in preparation) return preparation
-		const operations = request.operations ?? createLocalBashOperations()
-		const result = await operations.exec(preparation.command, request.cwd, {
-			onData: (data) => {
-				output = boundedAppend(output, data.toString("utf8"), outputLimit)
-			},
-			signal: request.signal,
-			env: preparation.environment,
-		})
+		const ready = preparation
+		const operations =
+			request.operations ?? reviewInheritedProcessOperations(controller.mode) ?? createLocalBashOperations()
+		const result = await withCommandSlot(controller, request.signal, () =>
+			operations.exec(ready.command, request.cwd, {
+				onData: (data) => {
+					output = boundedAppend(output, data.toString("utf8"), outputLimit)
+				},
+				signal: request.signal,
+				env: ready.environment,
+			}),
+		)
 		const status: ReviewCommandStatus = request.signal?.aborted
 			? "cancelled"
 			: result.exitCode === 0
@@ -588,6 +615,7 @@ export function createReviewBashToolDefinition(
 ): ReturnType<typeof createBashToolDefinition> {
 	const activeCall = new AsyncLocalStorage<string>()
 	const base = createBashToolDefinition(cwd, {
+		operations: reviewInheritedProcessOperations(controller.mode),
 		spawnHook: (context) => {
 			const toolCallId = activeCall.getStore()
 			return {
@@ -646,7 +674,9 @@ export function createReviewBashToolDefinition(
 					}
 				}
 				try {
-					const result = await activeCall.run(toolCallId, () => base.execute(toolCallId, input, signal, onUpdate, ctx))
+					const result = await withCommandSlot(controller, signal, () =>
+						activeCall.run(toolCallId, () => base.execute(toolCallId, input, signal, onUpdate, ctx)),
+					)
 					const exitCode =
 						result.structuredContent &&
 						typeof result.structuredContent === "object" &&

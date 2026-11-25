@@ -141,11 +141,11 @@ export async function getReviewTargetChoices(
 ): Promise<ReviewTargetChoices> {
 	return withReviewTargetFetchAuthorization(request.fetch, async () => {
 		const root = await repositoryRoot(options.root, options.signal)
-		await assertNoConversionDrivers(root, options.signal)
+		await assertNoConversionDrivers(root, options.signal, options.excludedDirectories)
 		const remote = await selectedRemote(root, options)
 		if (request.fetch) await fetchRemote(root, remote.name, options.signal)
 		const [inspection, baseSuggestion] = await Promise.all([
-			inspectWorkingTree(root, options.signal),
+			inspectWorkingTree(root, options.signal, options.excludedDirectories),
 			suggestBase(root, options, remote.name, remote.configured),
 		])
 		const dirty = inspection.status !== "clean"
@@ -265,6 +265,7 @@ export async function resolveReviewTarget(
 			request.kind === "working-tree" || request.includeWorkingTree
 				? await freezeWorkingTree(root, tipSha, {
 						signal: options.signal,
+						excludedDirectories: options.excludedDirectories,
 						beforeSnapshotCommit: options.beforeSnapshotCommit,
 					})
 				: { tipSha, headSha: tipSha, dirty: false, ref: undefined, cleanup: async () => {} }

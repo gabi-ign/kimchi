@@ -168,8 +168,12 @@ async function prepareReplyBatch(
 	return { records, contents, changed: contents !== previousContents }
 }
 
-async function collectEnvironmentGaps(store: ReviewPanelStateStore): Promise<EnvironmentGap[]> {
+async function collectEnvironmentGaps(
+	store: ReviewPanelStateStore,
+	coordinatorGaps: readonly EnvironmentGap[] = [],
+): Promise<EnvironmentGap[]> {
 	const gaps = new Map<string, EnvironmentGap>()
+	for (const gap of coordinatorGaps) gaps.set(JSON.stringify([gap.kind, gap.name, gap.note]), gap)
 	for (const lens of store.state.lenses) {
 		if (lens.status !== "submitted") continue
 		try {
@@ -212,6 +216,8 @@ export interface FinalizeReviewPanelOptions {
 	hasVerifier: boolean
 	/** Synchronize source writers immediately before replacing any final artifact. */
 	beforePublish?: () => Promise<void>
+	/** Trusted sandbox or coordinator environment limitations, merged with reviewer reports. */
+	environmentGaps?: EnvironmentGap[]
 }
 
 async function publishValidatedReconciliation(
@@ -363,7 +369,7 @@ export async function finalizeReviewPanel(options: FinalizeReviewPanelOptions): 
 	})
 	const input = {
 		body: summaryBody(store, findings.length),
-		environment_gaps: await collectEnvironmentGaps(store),
+		environment_gaps: await collectEnvironmentGaps(store, options.environmentGaps),
 		coverage,
 	}
 	let summary: ReviewSummaryRecord | undefined
